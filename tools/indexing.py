@@ -5,8 +5,10 @@ from lancedb.embeddings import get_registry
 from lancedb.embeddings.openai import OpenAIEmbeddings
 from lancedb.pydantic import LanceModel, Vector
 
+from embeddings import get_embedding_func
+func = get_embedding_func()
 
-# 1. Custom OpenRouter Embedding Class
+"""# 1. Custom OpenRouter Embedding Class
 @get_registry().register("openrouter")
 class OpenRouterEmbeddings(OpenAIEmbeddings):
     name: str = "voyageai/voyage-code-4"
@@ -28,7 +30,7 @@ func = registry.get("openrouter").create(
     base_url="https://openrouter.ai/api/v1",
     api_key="$var:openrouter_key",
     dim=1024,
-)
+)"""
 
 
 # 2. Database Schema

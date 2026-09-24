@@ -4,9 +4,9 @@ import os
 import sys
 import lancedb
 import asyncio
-
-# ✅ Use the new v2 location
 from mcp.server.mcpserver import MCPServer
+from embeddings import get_embedding_func
+
 
 def log_debug(msg: str):
     print(f"[DEBUG mcp_server] {msg}", file=sys.stderr, flush=True)
@@ -45,6 +45,9 @@ async def search_codebase(query: str, limit: int = 5) -> str:
         query: Natural language search query.
         limit: Maximum number of chunks to return.
     """
+    # instantiate embedding function
+    func = get_embedding_func()
+
     if table is None:
         return "Error: Code index table is not initialized."
 
@@ -65,6 +68,10 @@ async def get_file_context(filepath: str) -> str:
     Args:
         filepath: Relative file path.
     """
+
+    # instantiate embedding function
+    func = get_embedding_func()
+    
     if table is None:
         return "Error: Code index table is not initialized."
 
