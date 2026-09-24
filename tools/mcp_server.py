@@ -39,19 +39,31 @@ mcp = MCPServer("custom-rag-server")
 
 @mcp.tool()
 async def search_codebase(query: str, limit: int = 5) -> str:
-    """Search the codebase using vector similarity via OpenRouter embeddings.
+    """Search the indexed codebase using vector similarity.
+
+    Embeds the provided natural-language ``query`` with the configured
+    OpenRouter embedding function and returns the top ``limit`` most
+    similar code chunks from the LanceDB ``code_index`` table.
 
     Args:
-        query: Natural language search query.
-        limit: Maximum number of chunks to return.
-    """
-    # instantiate embedding function
-    func = get_embedding_func()
+        query: Natural-language or code query string to search for.
+        limit: Maximum number of matching chunks to return. Defaults to 5.
 
+    Returns:
+        A newline-separated string where each result is formatted as::
+
+            --- File: <filepath> (Lines <start_line>-<end_line>) ---
+            <chunk text>
+
+        If the code index table has not been initialized, or if the
+        underlying search raises an exception, an error message string
+        is returned instead of raising.
+    """
     if table is None:
         return "Error: Code index table is not initialized."
 
     try:
+        func = get_embedding_func()  # must run before table.search so registry var is set
         results = table.search(query).limit(limit).to_list()
         formatted = [
             f"--- File: {r['filepath']} (Lines {r['start_line']}-{r['end_line']}) ---\n{r['text']}"
@@ -59,23 +71,36 @@ async def search_codebase(query: str, limit: int = 5) -> str:
         ]
         return "\n\n".join(formatted)
     except Exception as e:
-        return f"Error executing search: {str(e)}"
+        log_debug(f"search_codebase failed: {type(e).__name__}: {e}")
+        return f"Error executing search: {type(e).__name__}: {e}"
+
 
 @mcp.tool()
 async def get_file_context(filepath: str) -> str:
-    """Retrieve all indexed chunks belonging to a specific file.
+    """Retrieve every indexed chunk that belongs to a specific file.
+
+    Looks up all rows in the ``code_index`` table whose ``filepath``
+    column exactly matches the provided path, sorts them by their
+    starting line number, and concatenates their raw text. This is
+    useful for reconstructing the full indexed contents of a file so
+    that additional context can be provided to a downstream model.
 
     Args:
-        filepath: Relative file path.
-    """
+        filepath: Path of the file (as stored at indexing time) whose
+            chunks should be retrieved.
 
-    # instantiate embedding function
-    func = get_embedding_func()
-    
+    Returns:
+        A string beginning with a ``=== File Context: <filepath> ===``
+        header followed by each chunk separated by blank lines. If no
+        chunks are found for the file, a "No indexed chunks found"
+        message is returned. If the code index table is unavailable or
+        the lookup raises, an error message string is returned.
+    """
     if table is None:
         return "Error: Code index table is not initialized."
 
     try:
+        func = get_embedding_func()
         safe_path = filepath.replace("'", "''")
         results = table.where(f"filepath = '{safe_path}'").to_list()
         if not results:
@@ -84,7 +109,8 @@ async def get_file_context(filepath: str) -> str:
         results.sort(key=lambda x: x["start_line"])
         return f"=== File Context: {filepath} ===\n\n" + "\n\n".join(r["text"] for r in results)
     except Exception as e:
-        return f"Error retrieving file context: {str(e)}"
+        log_debug(f"get_file_context failed: {type(e).__name__}: {e}")
+        return f"Error retrieving file context: {type(e).__name__}: {e}"
 
 
 if __name__ == "__main__":
