@@ -5,6 +5,24 @@ from lancedb.embeddings import get_registry
 from lancedb.embeddings.openai import OpenAIEmbeddings
 from lancedb.pydantic import LanceModel, Vector
 
+# ---- Token estimation -------------------------------------------------------
+# Voyage's tokenizer isn't public, so we estimate with tiktoken. `o200k_base`
+# (GPT-4o) tracks modern code tokenizers closely. If tiktoken isn't installed
+# we fall back to a deliberately conservative char/token ratio so we tend to
+# *over*-estimate, keeping us safely under the provider's hard cap.
+try:
+    import tiktoken
+
+    _ENCODER = tiktoken.get_encoding("o200k_base")
+
+    def estimate_tokens(text: str) -> int:
+        return len(_ENCODER.encode(text))
+
+except ImportError:  # pragma: no cover
+    def estimate_tokens(text: str) -> int:
+        # ~3 chars/token is a safe upper bound for mixed code/prose.
+        return max(1, len(text) // 3)
+
 from embeddings import get_embedding_func
 func = get_embedding_func()
 
@@ -137,7 +155,20 @@ def load_codebase_chunks(
 
 
 # 5. Pipeline Execution
-def index_codebase(target_directory: str, db_path: str = "./lancedb_index"):
+def index_codebase(
+    target_directory: str,
+    db_path: str = "./lancedb_index",
+    max_chunks_per_batch: int = 999,
+    max_tokens_per_batch: int = 30_000,
+):
+    """Index a repository, sending chunks to the embedding API in batches
+    bounded by *both* a chunk count and a token budget.
+
+    Defaults:
+        max_chunks_per_batch = 999   -> strictly < 1000 chunks
+        max_tokens_per_batch = 30000 -> keeps a ~2k-token safety buffer under
+                                         the 32000-token provider ceiling.
+    """
     print(f"Indexing repository at {target_directory}...")
     chunks = load_codebase_chunks(target_directory)
     print(f"Generated {len(chunks)} chunks across repository files.")
@@ -146,11 +177,56 @@ def index_codebase(target_directory: str, db_path: str = "./lancedb_index"):
         print("No indexable code found.")
         return
 
+    # Precompute token estimates once so batching stays cheap.
+    token_counts = [estimate_tokens(c["text"]) for c in chunks]
+
+    # Flag any single chunk that already blows the token budget.
+    oversized = [i for i, t in enumerate(token_counts) if t > max_tokens_per_batch]
+    if oversized:
+        print(
+            f"Warning: {len(oversized)} chunk(s) individually exceed "
+            f"{max_tokens_per_batch} tokens; each will be sent as its own "
+            f"batch and may be rejected by the API. Consider reducing "
+            f"chunk_size in chunk_text_by_lines()."
+        )
+
+    # Pack chunks into batches respecting both caps (greedy, order-preserving).
+    batches: list[list[int]] = []
+    current: list[int] = []
+    current_tokens = 0
+    for idx, t in enumerate(token_counts):
+        if current and (
+            len(current) >= max_chunks_per_batch
+            or current_tokens + t > max_tokens_per_batch
+        ):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(idx)
+        current_tokens += t
+    if current:
+        batches.append(current)
+
     db = lancedb.connect(db_path)
     table = db.create_table("code_index", schema=CodeChunkSchema, mode="overwrite")
 
-    print("Embedding and writing chunks to LanceDB via OpenRouter...")
-    table.add(chunks)
+    total = len(chunks)
+    print(
+        f"Embedding and writing {total} chunks to LanceDB via OpenRouter "
+        f"in {len(batches)} batch(es) "
+        f"(caps: <{max_chunks_per_batch + 1} chunks and "
+        f"<{max_tokens_per_batch + 1} tokens per batch)."
+    )
+
+    for batch_idx, idxs in enumerate(batches, start=1):
+        batch = [chunks[i] for i in idxs]
+        batch_tokens = sum(token_counts[i] for i in idxs)
+        print(
+            f"  Batch {batch_idx}/{len(batches)}: "
+            f"{len(batch)} chunk(s), ~{batch_tokens} tokens"
+        )
+        table.add(batch, on_bad_vectors="drop")
+
     print("Indexing complete!")
 
 
