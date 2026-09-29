@@ -102,12 +102,29 @@ async def get_file_context(filepath: str) -> str:
     try:
         func = get_embedding_func()
         safe_path = filepath.replace("'", "''")
-        results = table.where(f"filepath = '{safe_path}'").to_list()
+        results = (
+            table.search()
+            .where(f"filepath = '{safe_path}'")
+            .limit(10000)
+            .to_list()
+        )
         if not results:
             return f"No indexed chunks found for file: {filepath}"
 
-        results.sort(key=lambda x: x["start_line"])
-        return f"=== File Context: {filepath} ===\n\n" + "\n\n".join(r["text"] for r in results)
+        # Merge overlapping chunks by absolute line number.
+        line_map: dict[int, str] = {}
+        for r in sorted(results, key=lambda x: x["start_line"]):
+            start = r["start_line"]
+            for offset, line in enumerate(r["text"].splitlines()):
+                line_map.setdefault(start + offset, line)
+
+        if not line_map:
+            return f"No indexed chunks found for file: {filepath}"
+
+        ordered = [line_map[n] for n in sorted(line_map)]
+        return (
+            f"=== File Context: {filepath} ===\n\n" + "\n".join(ordered)
+        )
     except Exception as e:
         log_debug(f"get_file_context failed: {type(e).__name__}: {e}")
         return f"Error retrieving file context: {type(e).__name__}: {e}"
